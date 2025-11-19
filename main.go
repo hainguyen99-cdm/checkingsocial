@@ -9,21 +9,25 @@ import (
 )
 
 func main() {
-	// Khởi tạo router của Gin
-	router := gin.Default()
+	// Set Gin to release mode for production
+	gin.SetMode(gin.ReleaseMode)
 
-	// Dependency Injection: Tạo các instance
+	// Use gin.New() for a clean router, then add middleware manually
+	router := gin.New()
+	router.Use(gin.Recovery()) // Add recovery middleware to catch panics
+
+	// Dependency Injection: Create instances
 	socialCheckerService := service.NewSocialChecker()
 	socialHandler := handler.NewSocialHandler(socialCheckerService)
 
-	// Đăng ký các routes
+	// Register routes
 	socialHandler.RegisterRoutes(router)
 
-	// Cấu hình địa chỉ và cổng cho server
+	// Configure server address and port
 	serverAddr := ":8080"
 	log.Printf("Server is running on %s", serverAddr)
 
-	// Khởi chạy server
+	// Start the server
 	if err := router.Run(serverAddr); err != nil {
 		log.Fatalf("Failed to run server: %v", err)
 	}
