@@ -3,6 +3,7 @@ package service
 import (
 	"checkingsocial/farcaster"
 	"checkingsocial/internal/model"
+	"checkingsocial/twitter"
 	"errors"
 	"fmt"
 	"sync"
@@ -27,6 +28,9 @@ func NewSocialChecker() Checker {
 func (s *socialChecker) CheckSocialAction(req model.SocialActionRequest) (bool, error) {
 	if req.Social == "farcaster" && req.Action == "follow" {
 		return farcaster.CheckFollow(req.IDUser)
+	}
+	if req.Social == "twitter" && req.Action == "follow" {
+		return twitter.CheckFollow(req.IDUser)
 	}
 	return false, errors.New("unsupported social or action")
 }
