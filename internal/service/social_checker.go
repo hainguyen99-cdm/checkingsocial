@@ -29,7 +29,7 @@ func (s *socialChecker) CheckSocialAction(req model.SocialActionRequest) (bool, 
 	if req.Social == "farcaster" && req.Action == "follow" {
 		return farcaster.CheckFollow(req.IDUser)
 	}
-	if req.Social == "twitter" && req.Action == "follow" {
+	if req.Social == "X" && req.Action == "follow" {
 		return twitter.CheckFollow(req.IDUser)
 	}
 	return false, errors.New("unsupported social or action")
