@@ -1,1 +1,41 @@
+# Secrets
+.env
+*.env
+*.env.*
 x.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Go build artifacts
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.out
+*.test
+
+# Coverage & profiling
+coverage/
+coverage.out
+*.coverprofile
+*.pprof
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.iml
+
+# Node (if present)
+node_modules/
+.npm/
+
+# Misc
+.tmp/
+.temp/
+.cache/
