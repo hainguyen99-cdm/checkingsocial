@@ -1,7 +1,6 @@
 package farcaster
 
 import (
-	"checkingsocial/pkg/cache"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -219,95 +218,4 @@ func (nc *NeynarClient) CheckFollowUsingNeynar(ctx context.Context, userFID int6
 
 	// Check if the viewer (userFID) is following the target
 	return user.ViewerContext.Following, nil
-}
-
-// FetchAndCacheFollowersUsingNeynar fetches all followers for a target FID using Neynar API
-// and caches them in Redis (incremental mode)
-func (nc *NeynarClient) FetchAndCacheFollowersUsingNeynar(ctx context.Context, targetFID string) error {
-	log.Printf("[Neynar] Start incremental fetch for FID=%s", targetFID)
-
-	// Read existing cache size (before)
-	prevCount, err := cache.GetFollowerCount(ctx, targetFID)
-	if err != nil {
-		log.Printf("[Neynar][WARN] Could not get existing cache count for FID=%s: %v", targetFID, err)
-	}
-	log.Printf("[Neynar] Existing cached followers for FID=%s: %d (will add only new ones)", targetFID, prevCount)
-
-	var cursor string
-	totalFetched := 0         // total from API across pages
-	totalNewAdded := int64(0) // total newly added to Redis
-	pageCount := 0
-
-	// Get limit from environment or use default
-	limitStr := os.Getenv("NEYNAR_LIMIT")
-	limit := 100
-	if limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
-		}
-	}
-
-	for {
-		pageCount++
-		log.Printf("[Neynar] Fetching page=%d cursor_len=%d", pageCount, len(cursor))
-
-		resp, err := nc.FetchFollowers(ctx, targetFID, limit, cursor)
-		if err != nil {
-			return fmt.Errorf("failed to fetch followers: %w", err)
-		}
-
-		// Extract FIDs and cache them
-		if len(resp.Result.Users) > 0 {
-			fids := make([]int64, len(resp.Result.Users))
-			for i, user := range resp.Result.Users {
-				fids[i] = user.Fid
-			}
-
-			newAdded, err := cache.AddFollowerFIDsCount(ctx, targetFID, fids)
-			if err != nil {
-				return fmt.Errorf("failed to cache followers: %w", err)
-			}
-
-			totalFetched += len(fids)
-			totalNewAdded += newAdded
-
-			// Log per-page cache result with preview of first up to 5 FIDs
-			previewN := 5
-			if len(fids) < previewN {
-				previewN = len(fids)
-			}
-			log.Printf("[Neynar] Page=%d fetched=%d new_added=%d Preview=%v", pageCount, len(fids), newAdded, fids[:previewN])
-
-			// Log current total in Redis after this batch
-			if curr, err := cache.GetFollowerCount(ctx, targetFID); err == nil {
-				log.Printf("[Neynar] Current cached followers for FID=%s: %d", targetFID, curr)
-			} else {
-				log.Printf("[Neynar][WARN] Could not read current follower count: %v", err)
-			}
-		} else {
-			log.Printf("[Neynar] No users on page=%d (cursor=%s)", pageCount, cursor)
-		}
-
-		// Check if there are more pages
-		if resp.Next == nil || resp.Next.Cursor == "" {
-			log.Printf("[Neynar] No more cursor. Finished pagination at page=%d", pageCount)
-			break
-		}
-		cursor = resp.Next.Cursor
-
-		// Add a small delay to avoid rate limiting
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	// Update last sync time
-	if err := cache.SetLastSyncTime(ctx, targetFID, time.Now()); err != nil {
-		log.Printf("[Neynar][WARN] Failed to set last sync time: %v", err)
-	}
-
-	// Summary
-	currCount, _ := cache.GetFollowerCount(ctx, targetFID)
-	log.Printf("[Neynar] Done. Pages=%d api_fetched=%d newly_added=%d total_cached_before=%d total_cached_now=%d",
-		pageCount, totalFetched, totalNewAdded, prevCount, currCount)
-
-	return nil
 }
