@@ -1,7 +1,6 @@
 package farcaster
 
 import (
-	"checkingsocial/pkg/cache"
 	"context"
 	"fmt"
 	"log"
@@ -12,15 +11,15 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// CheckFollow checks if a user (userID) is a follower of the target FID by querying Redis cache
-// userID is the FID of the user we want to check
+// CheckFollow checks if a user (userID) follows the TARGET_FIDS using Neynar API only
+// Redis and cronjob paths have been removed from this flow.
 func CheckFollow(userID string) (bool, error) {
 	// Load environment variables from .env file
 	_ = godotenv.Load()
 
-	targetFIDStr := os.Getenv("TARGET_FID")
+	targetFIDStr := os.Getenv("TARGET_FIDS")
 	if targetFIDStr == "" {
-		return false, fmt.Errorf("TARGET_FID environment variable not set or empty")
+		return false, fmt.Errorf("TARGET_FIDS environment variable not set or empty")
 	}
 
 	// Parse userID as int64
@@ -29,16 +28,33 @@ func CheckFollow(userID string) (bool, error) {
 		return false, fmt.Errorf("invalid userID format: %w", err)
 	}
 
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Check if userID is in the followers set in Redis
-	isFollower, err := cache.IsFollower(ctx, targetFIDStr, userFID)
+	// Parse targetFID as int64
+	targetFID, err := strconv.ParseInt(targetFIDStr, 10, 64)
 	if err != nil {
-		log.Printf("Error checking follower in Redis: %v", err)
-		return false, err
+		return false, fmt.Errorf("invalid targetFID format: %w", err)
 	}
 
-	return isFollower, nil
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	log.Printf("[Neynar][DEBUG] Forcing Neynar API path for follow check TARGET_FIDS=%s userFID=%d", targetFIDStr, userFID)
+	return CheckFollowUsingNeynar(ctx, userFID, targetFID)
+}
+
+// CheckFollowUsingNeynar checks if a user follows a target FID using Neynar API
+func CheckFollowUsingNeynar(ctx context.Context, userFID int64, targetFID int64) (bool, error) {
+	log.Printf("[Neynar][DEBUG] CheckFollowUsingNeynar userFID=%d targetFID=%d", userFID, targetFID)
+	client, err := NewNeynarClient()
+	if err != nil {
+		return false, fmt.Errorf("failed to create Neynar client: %w", err)
+	}
+
+	res, err := client.CheckFollowUsingNeynar(ctx, userFID, targetFID)
+	if err != nil {
+		log.Printf("[Neynar][DEBUG] CheckFollowUsingNeynar error=%v", err)
+		return false, err
+	}
+	log.Printf("[Neynar][DEBUG] CheckFollowUsingNeynar result=%v", res)
+	return res, nil
 }

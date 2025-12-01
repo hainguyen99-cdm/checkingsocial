@@ -1,192 +1,207 @@
 package twitter
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
-// extractCookieValue returns the value for a cookie name from a raw Cookie header string.
-// It trims spaces and surrounding quotes.
-func extractCookieValue(cookieHeader, name string) string {
-	parts := strings.Split(cookieHeader, ";")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		kv := strings.SplitN(p, "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		k := strings.TrimSpace(kv[0])
-		v := strings.TrimSpace(kv[1])
-		if k == name {
-			return strings.Trim(v, "\"")
-		}
+// isTruthy returns true if an env-like string represents a truthy value
+func isTruthy(s string) bool {
+	v := strings.ToLower(strings.TrimSpace(s))
+	switch v {
+	case "1", "true", "yes", "y", "on":
+		return true
 	}
-	return ""
+	return false
 }
 
-// CheckFollow checks if the given userId follows the target Twitter account (by rest_id).
-// It calls X (Twitter) internal GraphQL Following endpoint and scans the returned entries.
-// Returns true if an entryId of form "user-<TARGET_ID>" is present in the returned page; otherwise false.
+// CheckFollow checks if user_b (userID) follows user_a (target username) using Apify actor.
+// Inputs:
+//   - userID: will be sent as user_b (the account to check if it follows target)
+//
+// Config via ENV:
+//   - TWITTER_TARGET_USERNAME: the target account (user_a)
+//   - APIFY_ACT_URL (optional): override Apify actor URL (defaults to UC0t7r32caYf7tYgZ)
+//   - X_TOKEN_FILE (optional): path to x.txt (default: ./x.txt) with lines: cookie|token
+//
+// Behavior:
+//   - Picks a random cookie|token pair from x.txt
+//   - Calls Apify run-sync-get-dataset-items with JSON body
+//   - Returns true if user_b_follows_user_a is true in the first item of result
 func CheckFollow(userID string) (bool, error) {
-	// Load env vars if .env present
 	_ = godotenv.Load()
 
-	// Required configuration
-	queryID := os.Getenv("TWITTER_QUERY_ID")
-	if queryID == "" {
-		// default to a commonly observed hash, but allow override by env as this changes often
-		queryID = "S5xUN9s2v4xk50KWGGvyvQ"
-	}
-	bearer := os.Getenv("TWITTER_BEARER")
-	cookie := os.Getenv("TWITTER_COOKIE")
-	csrf := os.Getenv("TWITTER_CT0")
-	targetID := os.Getenv("TWITTER_TARGET_ID")
-
-	if bearer == "" {
-		return false, fmt.Errorf("missing required envs: TWITTER_BEARER")
-	}
-	// Decode cookie if user pasted URL-encoded value (e.g., with %3A, %3B, etc.)
-	if dec, err := url.QueryUnescape(cookie); err == nil {
-		cookie = dec
-	}
-	// If CT0 not provided separately, try to extract from cookie string
-	if csrf == "" {
-		csrf = extractCookieValue(cookie, "ct0")
-	}
-	if csrf == "" {
-		return false, fmt.Errorf("missing CSRF token: set TWITTER_CT0 or include ct0 in TWITTER_COOKIE")
-	}
-	if targetID == "" {
-		return false, fmt.Errorf("TWITTER_TARGET_ID not set")
+	target := os.Getenv("TWITTER_TARGET_USERNAME")
+	if target == "" {
+		return false, errors.New("TWITTER_TARGET_USERNAME not set")
 	}
 
-	variables := map[string]any{
-		"userId":                 userID,
-		"count":                  20,
-		"includePromotedContent": false,
-		"withGrokTranslatedBio":  false,
-	}
-	features := map[string]any{
-		"rweb_video_screen_enabled":                                               false,
-		"profile_label_improvements_pcf_label_in_post_enabled":                    true,
-		"responsive_web_profile_redirect_enabled":                                 false,
-		"rweb_tipjar_consumption_enabled":                                         true,
-		"verified_phone_label_enabled":                                            false,
-		"creator_subscriptions_tweet_preview_api_enabled":                         true,
-		"responsive_web_graphql_timeline_navigation_enabled":                      true,
-		"responsive_web_graphql_skip_user_profile_image_extensions_enabled":       false,
-		"premium_content_api_read_enabled":                                        false,
-		"communities_web_enable_tweet_community_results_fetch":                    true,
-		"c9s_tweet_anatomy_moderator_badge_enabled":                               true,
-		"responsive_web_grok_analyze_button_fetch_trends_enabled":                 false,
-		"responsive_web_grok_analyze_post_followups_enabled":                      true,
-		"responsive_web_jetfuel_frame":                                            true,
-		"responsive_web_grok_share_attachment_enabled":                            true,
-		"articles_preview_enabled":                                                true,
-		"responsive_web_edit_tweet_api_enabled":                                   true,
-		"graphql_is_translatable_rweb_tweet_is_translatable_enabled":              true,
-		"view_counts_everywhere_api_enabled":                                      true,
-		"longform_notetweets_consumption_enabled":                                 true,
-		"responsive_web_twitter_article_tweet_consumption_enabled":                true,
-		"tweet_awards_web_tipping_enabled":                                        false,
-		"responsive_web_grok_show_grok_translated_post":                           false,
-		"responsive_web_grok_analysis_button_from_backend":                        true,
-		"creator_subscriptions_quote_tweet_preview_enabled":                       false,
-		"freedom_of_speech_not_reach_fetch_enabled":                               true,
-		"standardized_nudges_misinfo":                                             true,
-		"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
-		"longform_notetweets_rich_text_read_enabled":                              true,
-		"longform_notetweets_inline_media_enabled":                                true,
-		"responsive_web_grok_image_annotation_enabled":                            true,
-		"responsive_web_grok_imagine_annotation_enabled":                          true,
-		"responsive_web_grok_community_note_auto_translation_is_enabled":          false,
-		"responsive_web_enhance_cards_enabled":                                    false,
+	apifyURL := os.Getenv("APIFY_ACT_URL")
+	if apifyURL == "" {
+		apifyURL = "https://api.apify.com/v2/acts/UC0t7r32caYf7tYgZ/run-sync-get-dataset-items"
 	}
 
-	variablesJSON, _ := json.Marshal(variables)
-	featuresJSON, _ := json.Marshal(features)
+	cookies := "[{\"domain\":\".x.com\",\"expirationDate\":1746856132.619477,\"hostOnly\":false,\"httpOnly\":true,\"name\":\"__cf_bm\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"nxqSkSFt_3UkBWH576nmL44QmPDWzVDjgIkLfeLHOsM-1746854332-1.0.1.1-.D.PjFVYMhjL77et4PsMZlLNYXg4KRzBUFRqAWpRcQbXf6H_5DIZQulrUK7tu34y3rdkEuyq6rjjJfYYxoXEs5vG9W8r.OWN.0WehXsCBOU\",\"id\":1},{\"domain\":\".x.com\",\"expirationDate\":1781195046.756188,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"_ga\",\"path\":\"/\",\"sameSite\":\"unspecified\",\"secure\":false,\"session\":false,\"storeId\":\"0\",\"value\":\"GA1.1.798476497.1746635047\",\"id\":2},{\"domain\":\".x.com\",\"expirationDate\":1781195575.696591,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"_ga_RJGMY4G45L\",\"path\":\"/\",\"sameSite\":\"unspecified\",\"secure\":false,\"session\":false,\"storeId\":\"0\",\"value\":\"GS2.1.s1746635046$o1$g0$t1746635575$j60$l0$h0\",\"id\":3},{\"domain\":\".x.com\",\"expirationDate\":1771085083.01971,\"hostOnly\":false,\"httpOnly\":true,\"name\":\"auth_token\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"e8ebde28ed35f60bbaa480fadf171a2706262770\",\"id\":4},{\"domain\":\".x.com\",\"expirationDate\":1771085083.370993,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"ct0\",\"path\":\"/\",\"sameSite\":\"lax\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"b49f42546ed0263e7ed05dd736255e27cb99c44fb82abe573b42ae3132c7a5272856579502280f5624892335fcc0c6a686836b689565d9d0aaf4ad2c630fb7d77a67b7863020e130eeb1ed7dbf907a0c\",\"id\":5},{\"domain\":\".x.com\",\"expirationDate\":1767339612.610054,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"guest_id\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"v1%3A172490945488285787\",\"id\":6},{\"domain\":\".x.com\",\"expirationDate\":1781414587.680152,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"guest_id_ads\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"v1%3A172490945488285787\",\"id\":7},{\"domain\":\".x.com\",\"expirationDate\":1781414587.680395,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"guest_id_marketing\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"v1%3A172490945488285787\",\"id\":8},{\"domain\":\".x.com\",\"expirationDate\":1771085083.019629,\"hostOnly\":false,\"httpOnly\":true,\"name\":\"kdt\",\"path\":\"/\",\"sameSite\":\"unspecified\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"0MprSsNU5W2zirK0Kdo6YW1QFh58oyeb4Qw5RChk\",\"id\":9},{\"domain\":\".x.com\",\"expirationDate\":1778390588.734748,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"night_mode\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"2\",\"id\":10},{\"domain\":\".x.com\",\"expirationDate\":1768061146.52658,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"personalization_id\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"\\\"v1_fo7TidorU55HXywHnSY3Yw==\\\"\",\"id\":11},{\"domain\":\".x.com\",\"expirationDate\":1778390593.659738,\"hostOnly\":false,\"httpOnly\":false,\"name\":\"twid\",\"path\":\"/\",\"sameSite\":\"no_restriction\",\"secure\":true,\"session\":false,\"storeId\":\"0\",\"value\":\"u%3D1877748387220799489\",\"id\":12},{\"domain\":\"x.com\",\"hostOnly\":true,\"httpOnly\":false,\"name\":\"lang\",\"path\":\"/\",\"sameSite\":\"unspecified\",\"secure\":false,\"session\":true,\"storeId\":\"0\",\"value\":\"en\",\"id\":13}]"
+	token := "REMOVED_APIFY_TOKEN"
 
-	u := fmt.Sprintf("https://x.com/i/api/graphql/%s/Following?variables=%s&features=%s",
-		queryID, url.QueryEscape(string(variablesJSON)), url.QueryEscape(string(featuresJSON)))
+	// Build top-level payload as actor expects (no "input" wrapper)
+	// Ensure cookies string is not double-quoted; unquote if needed
+	if strings.HasPrefix(cookies, "\"") && strings.HasSuffix(cookies, "\"") {
+		if unq, err := strconv.Unquote(cookies); err == nil {
+			cookies = unq
+		}
+	}
+	payload := struct {
+		Cookies string `json:"cookies"`
+		UserA   string `json:"user_a"`
+		UserB   string `json:"user_b"`
+	}{
+		Cookies: cookies,
+		UserA:   target,
+		UserB:   userID,
+	}
+	bodyBytes, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest("GET", u, nil)
+	// Debug payload (masked) if APIFY_DEBUG is enabled
+	if isTruthy(os.Getenv("APIFY_DEBUG")) {
+		masked := map[string]any{
+			"cookies": "<masked>",
+			"user_a":  target,
+			"user_b":  userID,
+		}
+		mb, _ := json.Marshal(masked)
+		log.Printf("[Apify] URL=%s", apifyURL)
+		log.Printf("[Apify] Request=%s", string(mb))
+	}
+
+	req, err := http.NewRequest("POST", apifyURL, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return false, err
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 
-	// Headers (keep minimal required set)
-	req.Header.Set("accept", "*/*")
-	req.Header.Set("authorization", "Bearer "+bearer)
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-csrf-token", csrf)
-	req.Header.Set("x-twitter-active-user", "yes")
-	req.Header.Set("x-twitter-auth-type", "OAuth2Session")
-	req.Header.Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-	req.Header.Set("cookie", `guest_id_marketing=v1%3A176362541654113270; guest_id_ads=v1%3A176362541654113270; guest_id=v1%3A176362541654113270; personalization_id="v1_+w7xL28oM+zyv6l07Acgcg=="; gt=1991415449637253140; __cuid=f870393e1dcd4ce5ac31294aa53e0d25; g_state={"i_l":0,"i_ll":1763625531382,"i_b":"fbktveH4t9AiDD8L295e3ciN7z/D7zvUPKRqywJV3Cg"}; kdt=pMx5PX08CWcMA9dDv8Wfjy7hCpGSdmZ1dQStT6IQ; auth_token=cafa295c85e1fcb6cade0e080be8547b153eb0fb; ct0=abfe3ce07dd4679919844e313099cf2ced7e97164f1042782a72c76db1206c89841ff0dfa4b2f766d82affb14c3fe985ae516249deffe92d184752915b5ce2b8b540d03b6b944051f7f059c714186426; att=1-QmzcsPkP2JiwQLolyemVB2XB15NFhCRX336WlSAs; lang=en; twid=u%3D1750722368132308992; first_ref=https%3A%2F%2Fx.com%2Fi%2Fflow%2Flogin; __cf_bm=G0_ck9tVVhaAlDV.x_new0RmeEdiEapRcAYZi3mvfZ0-1763625890.730432-1.0.1.1-kz5ZJFPSX8iFEDhq_53GnwqTk3CvrJG7irHsg_rAdRXUSpx4d1sVIr4JuIfPuzYzyo9SW9.YtqTmxt.5EAt6PcdLyZhL4QhYgLEOhcUcBUU94FOxphsWX_nWYQkUypAq`)
-
-	client := &http.Client{}
+	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}
 	defer resp.Body.Close()
 
+	// Read full body for flexible decoding and better error messages
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("apify read body error: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("twitter api status %d: %s", resp.StatusCode, string(body))
-	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Log masked request for troubleshooting (top-level payload)
+		masked := map[string]any{
+			"cookies": "<masked>",
+			"user_a":  target,
+			"user_b":  userID,
+		}
+		mb, _ := json.Marshal(masked)
+		log.Printf("[Apify][ERROR] URL=%s", apifyURL)
+		log.Printf("[Apify][ERROR] Request=%s", string(mb))
 
-	// Parse just enough of the response to find entryIds
-	var parsed struct {
-		Data struct {
-			User struct {
-				Result struct {
-					Timeline struct {
-						Timeline struct {
-							Instructions []struct {
-								Type    string `json:"type"`
-								Entries []struct {
-									EntryId string `json:"entryId"`
-								} `json:"entries"`
-							} `json:"instructions"`
-						} `json:"timeline"`
-					} `json:"timeline"`
-				} `json:"result"`
-			} `json:"user"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		// If unmarshal fails, return detailed snippet for debugging
+		// Return a short snippet to avoid logging secrets
 		snippet := string(body)
 		if len(snippet) > 512 {
 			snippet = snippet[:512]
 		}
-		return false, fmt.Errorf("failed to parse twitter response: %v; body: %s", err, snippet)
+		log.Printf("[Apify][ERROR] Status=%d Body=%s", resp.StatusCode, snippet)
+		return false, fmt.Errorf("apify status %d: %s", resp.StatusCode, snippet)
 	}
 
-	prefix := "user-" + targetID
-	for _, instr := range parsed.Data.User.Result.Timeline.Timeline.Instructions {
-		if strings.EqualFold(instr.Type, "TimelineAddEntries") {
-			for _, e := range instr.Entries {
-				if e.EntryId == prefix {
-					return true, nil
-				}
+	// Try decode as array first (expected shape)
+	type item struct {
+		Status            string `json:"status"`
+		UserBFollowsUserA bool   `json:"user_b_follows_user_a"`
+	}
+	var arr []item
+	if err := json.Unmarshal(body, &arr); err == nil {
+		if len(arr) == 0 {
+			return false, errors.New("apify empty result")
+		}
+		return arr[0].UserBFollowsUserA, nil
+	}
+
+	// Fallback: sometimes actor returns a single object instead of array
+	var obj item
+	if err := json.Unmarshal(body, &obj); err == nil && (obj.Status != "" || obj.UserBFollowsUserA || strings.Contains(string(body), "user_b_follows_user_a")) {
+		return obj.UserBFollowsUserA, nil
+	}
+
+	// Fallback 2: generic map to probe key
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err == nil {
+		if v, ok := m["user_b_follows_user_a"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				return b, nil
 			}
+		}
+		if msg, ok := m["error"]; ok {
+			return false, fmt.Errorf("apify error: %v", msg)
 		}
 	}
 
-	return false, nil
+	snippet := string(body)
+	if len(snippet) > 512 {
+		snippet = snippet[:512]
+	}
+	return false, fmt.Errorf("apify decode error: body: %s", snippet)
+}
+
+// pickRandomCookieToken returns [cookies, token] by reading a random line from x.txt (or X_TOKEN_FILE)
+// Each line format: cookie|token
+func pickRandomCookieToken() ([2]string, error) {
+	filePath := os.Getenv("X_TOKEN_FILE")
+	if filePath == "" {
+		filePath = "x.txt"
+	}
+	abs, _ := filepath.Abs(filePath)
+	f, err := os.Open(abs)
+	if err != nil {
+		return [2]string{}, fmt.Errorf("open %s: %w", abs, err)
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	var pairs [][2]string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		pairs = append(pairs, [2]string{strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])})
+	}
+	if err := scanner.Err(); err != nil {
+		return [2]string{}, err
+	}
+	if len(pairs) == 0 {
+		return [2]string{}, errors.New("no cookie|token pair found in x.txt")
+	}
+
+	rand.Seed(time.Now().UnixNano())
+	pick := pairs[rand.Intn(len(pairs))]
+	return pick, nil
 }
