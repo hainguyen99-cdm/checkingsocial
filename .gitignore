@@ -3,7 +3,7 @@
 *.env
 *.env.*
 x.txt
-
+cookie.txt
 # OS files
 .DS_Store
 Thumbs.db
